@@ -26,6 +26,16 @@ public class Settings : ISettings
     public HotkeyNode MoveToInventoryHotkey { get; set; } = new(Keys.F1);
     public ToggleNode UseMoveToInventoryAsMoveToStashWhenNoHighlights { get; set; } = new(false);
     public HotkeyNode MoveToStashHotkey { get; set; } = new(Keys.None);
+
+    [Menu("Bestiary: Move to Inventory (Check Space)", "Move beasts from Bestiary to inventory, respecting free space")]
+    public HotkeyNode BestiaryToInventoryWithCheckHotkey { get; set; } = new(Keys.None);
+
+    [Menu("Bestiary: Move to Inventory (Force)", "Move all beasts from Bestiary to inventory, ignore space check")]
+    public HotkeyNode BestiaryToInventoryForceHotkey { get; set; } = new(Keys.None);
+
+    [Menu("Bestiary: Debug Panel", "Debug bestiary panel without moving beasts")]
+    public HotkeyNode BestiaryDebugHotkey { get; set; } = new(Keys.None);
+
     public ToggleNode InvertSelection { get; set; } = new(false);
     public ToggleNode ShowCustomFilterWindow { get; set; } = new(true);
     public ToggleNode ResetCustomFilterOnPanelClose { get; set; } = new(true);
