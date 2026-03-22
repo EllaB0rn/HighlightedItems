@@ -365,6 +365,24 @@ public class HighlightedItems : BaseSettingsPlugin<Settings>
         }
     }
 
+    private async SyncTask<bool> WaitForInventoryChange(int initialCount, int maxWaitMs = 2000)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < maxWaitMs)
+        {
+            var currentCount = (int)GameController.IngameState.ServerData.PlayerInventories[0].Inventory.CountItems;
+            if (currentCount != initialCount)
+            {
+                DebugWindow.LogMsg($"HighlightedItems: Inventory changed from {initialCount} to {currentCount} items");
+                return true;
+            }
+            await TaskUtils.NextFrame();
+        }
+
+        DebugWindow.LogMsg($"HighlightedItems: Timeout waiting for inventory change (still {initialCount} items)");
+        return false;
+    }
+
     private async SyncTask<bool> MoveItemsToStashWithRetry(Predicate<Entity> itemFilter)
     {
         int retryAttempt = 0;
@@ -398,6 +416,9 @@ public class HighlightedItems : BaseSettingsPlugin<Settings>
                 DebugWindow.LogMsg($"HighlightedItems: Retry attempt {retryAttempt}/{maxRetries}, {inventoryItems.Count} items remaining");
             }
 
+            // Record initial count before moving
+            int initialCount = (int)GameController.IngameState.ServerData.PlayerInventories[0].Inventory.CountItems;
+
             // Move items
             bool success = await MoveItemsToStash(inventoryItems);
 
@@ -406,14 +427,14 @@ public class HighlightedItems : BaseSettingsPlugin<Settings>
                 return false;
             }
 
+            // Wait for inventory to actually change (items transferred)
+            await WaitForInventoryChange(initialCount, 2000);
+
             // Check if we should retry
             if (!Settings.RetryMissedItems || retryAttempt >= maxRetries)
             {
                 break;
             }
-
-            // Wait a bit before checking for remaining items
-            await Wait(TimeSpan.FromMilliseconds(100), false);
 
             retryAttempt++;
         }
@@ -506,6 +527,9 @@ public class HighlightedItems : BaseSettingsPlugin<Settings>
                 DebugWindow.LogMsg($"HighlightedItems: Retry attempt {retryAttempt}/{maxRetries}, {highlightedItems.Count} items remaining");
             }
 
+            // Record initial count before moving
+            int initialCount = (int)GameController.IngameState.ServerData.PlayerInventories[0].Inventory.CountItems;
+
             // Move items
             bool success = await MoveItemsToInventory(highlightedItems);
 
@@ -514,14 +538,14 @@ public class HighlightedItems : BaseSettingsPlugin<Settings>
                 return false;
             }
 
+            // Wait for inventory to actually change (items transferred)
+            await WaitForInventoryChange(initialCount, 2000);
+
             // Check if we should retry
             if (!Settings.RetryMissedItems || retryAttempt >= maxRetries)
             {
                 break;
             }
-
-            // Wait a bit before checking for remaining items
-            await Wait(TimeSpan.FromMilliseconds(100), false);
 
             retryAttempt++;
         }
