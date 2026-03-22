@@ -1,5 +1,0 @@
-D:\File\Program\PoE bots\PoEH\Plugins\Source\HighlightedItems\obj\Debug\net10.0-windows\HighlightedItems.csproj.AssemblyReference.cache
-D:\File\Program\PoE bots\PoEH\Plugins\Source\HighlightedItems\obj\Debug\net10.0-windows\HighlightedItems.GeneratedMSBuildEditorConfig.editorconfig
-D:\File\Program\PoE bots\PoEH\Plugins\Source\HighlightedItems\obj\Debug\net10.0-windows\HighlightedItems.AssemblyInfoInputs.cache
-D:\File\Program\PoE bots\PoEH\Plugins\Source\HighlightedItems\obj\Debug\net10.0-windows\HighlightedItems.AssemblyInfo.cs
-D:\File\Program\PoE bots\PoEH\Plugins\Source\HighlightedItems\obj\Debug\net10.0-windows\HighlightedItems.csproj.CoreCompileInputs.cache
