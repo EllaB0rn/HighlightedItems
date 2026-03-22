@@ -1,0 +1,2 @@
+Build failed:
+[22.03.2026 17:55:52, D:\File\Program\PoE bots\PoEH\Plugins\Source\HighlightedItems\HighlightedItems.cs(442, 28)] CS0266: Не удается неявно преобразовать тип "long" в "int". Существует явное преобразование (возможно, пропущено приведение типов).
