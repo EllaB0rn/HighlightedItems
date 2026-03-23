@@ -37,6 +37,13 @@ public class HighlightedItems : BaseSettingsPlugin<Settings>
     private long _lastInventorySaturationCheck;
     private Task _saturationUpdateTask;
 
+    // Constants
+    private const int MAX_INVENTORY_ITEMS = 60;
+    private const int BESTIARY_CATEGORIES = 12;
+    private const int BEASTS_PER_BATCH = 9;
+    private const int WORK_PAUSE_INTERVAL_MS = 10000;
+    private const int WORK_PAUSE_DURATION_MS = 1000;
+
     private record QueryOrException(ItemQuery Query, Exception Exception);
 
     private readonly ConditionalWeakTable<string, QueryOrException> _queries = [];
@@ -625,34 +632,35 @@ public class HighlightedItems : BaseSettingsPlugin<Settings>
         return null;
     }
 
+    // Helper method to get current inventory count
+    private int GetInventoryCount() => (int)GameController.IngameState.ServerData.PlayerInventories[0].Inventory.CountItems;
+
+    // Helper method to check if inventory is full
+    private bool IsInventoryFull() => GetInventoryCount() >= MAX_INVENTORY_ITEMS;
+
+    // Helper method to get remaining inventory slots
+    private int GetRemainingInventorySlots() => MAX_INVENTORY_ITEMS - GetInventoryCount();
+
     private async SyncTask<bool> MoveBeastsToInventoryWithCheck()
     {
         DebugWindow.LogMsg("HighlightedItems: MoveBeastsToInventoryWithCheck started");
-        var startTime = Stopwatch.StartNew();
 
-        // For bestiary, skip idle mouse delay - we use Ctrl+Click, not drag-and-drop
+        // Wait for mouse to be released
         while (Control.MouseButtons == MouseButtons.Left || MoveCancellationRequested)
         {
-            if (MoveCancellationRequested)
-            {
-                return false;
-            }
+            if (MoveCancellationRequested) return false;
             await TaskUtils.NextFrame();
         }
-        DebugWindow.LogMsg($"HighlightedItems: Mouse check completed in {startTime.ElapsedMilliseconds}ms");
 
-        // Check if Bestiary panel is open (use cached version for speed)
-        var panelCheckStart = Stopwatch.StartNew();
+        // Check if Bestiary panel is open
         var bestiaryPanel = GetBestiaryPanelCached();
-        DebugWindow.LogMsg($"HighlightedItems: Panel check completed in {panelCheckStart.ElapsedMilliseconds}ms");
-
         if (bestiaryPanel == null)
         {
             DebugWindow.LogMsg("HighlightedItems: Bestiary panel is not open");
             return false;
         }
 
-        // Open inventory if not already open
+        // Open inventory if needed
         if (!InGameState.IngameUi.InventoryPanel.IsVisible)
         {
             DebugWindow.LogMsg("HighlightedItems: Opening inventory...");
@@ -660,237 +668,138 @@ public class HighlightedItems : BaseSettingsPlugin<Settings>
             Keyboard.KeyUp(Keys.I);
             await Wait(TimeSpan.FromMilliseconds(150), false);
 
-            // Verify inventory opened
             if (!InGameState.IngameUi.InventoryPanel.IsVisible)
             {
                 DebugWindow.LogMsg("HighlightedItems: Failed to open inventory");
                 return false;
             }
         }
-        DebugWindow.LogMsg($"HighlightedItems: Initialization completed in {startTime.ElapsedMilliseconds}ms");
 
-        // Check inventory space BEFORE starting
-        var inventory = GameController.IngameState.ServerData.PlayerInventories[0].Inventory;
-        int initialCount = (int)inventory.CountItems;
-        int maxItems = 60;
-        int totalFreeSlots = maxItems - initialCount;
-
+        // Check inventory space
+        int totalFreeSlots = GetRemainingInventorySlots();
         if (totalFreeSlots <= 0)
         {
-            DebugWindow.LogMsg($"HighlightedItems: Inventory full ({initialCount}/{maxItems}), cannot move beasts");
+            DebugWindow.LogMsg("HighlightedItems: Inventory full, cannot move beasts");
             return false;
         }
 
         DebugWindow.LogMsg($"HighlightedItems: Starting beast transfer. Free slots: {totalFreeSlots}");
 
-        // Save initial mouse position and press Ctrl ONCE at the start
+        // Save initial mouse position and press Ctrl
         _prevMousePos = Mouse.GetCursorPosition();
-        DebugWindow.LogMsg("HighlightedItems: Pressing Ctrl key");
         Keyboard.KeyDown(Keys.LControlKey);
         await Wait(KeyDelay, true);
 
         int totalMoved = 0;
-        int waitTimeout = Settings.FastMode.Value ? 300 : 600;  // Further reduced for faster response
+        int waitTimeout = Settings.FastMode.Value ? 300 : 600;
         int maxRetries = Settings.RetryMissedItems.Value ? Settings.MaxRetryAttempts.Value : 0;
         int currentCategory = 0;
-        bool isFirstBatch = true; // Track first batch for initial delay
-        var workTimer = Stopwatch.StartNew(); // Track continuous work time
+        bool isFirstBatch = true;
+        var workTimer = Stopwatch.StartNew();
 
-        while (totalMoved < totalFreeSlots && currentCategory < 12)
+        while (totalMoved < totalFreeSlots && currentCategory < BESTIARY_CATEGORIES)
         {
-            // Check for cancellation
             if (MoveCancellationRequested)
             {
-                DebugWindow.LogMsg("HighlightedItems: Cancellation requested");
                 await StopMovingItems();
                 return totalMoved > 0;
             }
 
-            // Pause for 1 second after every 10 seconds of continuous work
-            if (workTimer.ElapsedMilliseconds >= 10000)
+            // Pause after continuous work
+            if (workTimer.ElapsedMilliseconds >= WORK_PAUSE_INTERVAL_MS)
             {
-                DebugWindow.LogMsg("HighlightedItems: Pausing for 1 second after 10 seconds of work");
-                await Wait(TimeSpan.FromMilliseconds(1000), false);
+                await Wait(TimeSpan.FromMilliseconds(WORK_PAUSE_DURATION_MS), false);
                 workTimer.Restart();
-                DebugWindow.LogMsg("HighlightedItems: Resuming work");
             }
 
-            // Check if inventory is actually full before continuing
-            int currentInvCount = (int)GameController.IngameState.ServerData.PlayerInventories[0].Inventory.CountItems;
-            if (currentInvCount >= 60)
+            // Check if inventory is full
+            if (IsInventoryFull())
             {
-                DebugWindow.LogMsg($"HighlightedItems: Inventory is full ({currentInvCount}/60), stopping");
+                DebugWindow.LogMsg("HighlightedItems: Inventory full, stopping");
                 break;
             }
 
             bestiaryPanel = GetBestiaryPanelCached();
             if (bestiaryPanel == null)
             {
-                DebugWindow.LogMsg("HighlightedItems: Bestiary panel not found");
                 await StopMovingItems();
                 return totalMoved > 0;
             }
 
-            // Get beasts from current category only (limit to 9 for performance)
-            var beasts = bestiaryPanel.GetBeastsFromCategory(currentCategory, 9);
-
-            // If no beasts in this category, move to next
+            // Get beasts from current category
+            var beasts = bestiaryPanel.GetBeastsFromCategory(currentCategory, BEASTS_PER_BATCH);
             if (beasts == null || beasts.Count == 0)
             {
-                DebugWindow.LogMsg($"HighlightedItems: Category {currentCategory} is empty, skipping");
                 currentCategory++;
                 continue;
             }
 
-            DebugWindow.LogMsg($"HighlightedItems: Category {currentCategory} has beasts (showing first {beasts.Count})");
-
-            // Reverse order: bottom to top, right to left
             beasts.Reverse();
 
-            // Take up to 9 visible beasts from this category, but also respect remaining inventory space
-            int remainingSlots = totalFreeSlots - totalMoved;
+            // Calculate how many beasts to move
+            int beastsToTake = Math.Min(BEASTS_PER_BATCH, Math.Min(beasts.Count, GetRemainingInventorySlots()));
+            if (beastsToTake <= 0) break;
 
-            // Double-check actual inventory space
-            int actualCurrentCount = (int)GameController.IngameState.ServerData.PlayerInventories[0].Inventory.CountItems;
-            int actualRemainingSlots = 60 - actualCurrentCount;
-
-            // Use the minimum of calculated and actual remaining slots
-            int slotsToUse = Math.Min(remainingSlots, actualRemainingSlots);
-
-            if (slotsToUse <= 0)
-            {
-                DebugWindow.LogMsg($"HighlightedItems: No remaining slots (calculated: {remainingSlots}, actual: {actualRemainingSlots}), stopping");
-                break;
-            }
-
-            int beastsToTake = Math.Min(9, Math.Min(beasts.Count, slotsToUse));
             var beastsToMove = beasts.Take(beastsToTake).ToList();
-
-            DebugWindow.LogMsg($"HighlightedItems: Category {currentCategory}: Moving {beastsToMove.Count} beasts, remaining slots: {slotsToUse}");
-
-            // Get current count for change detection
-            int inventoryCountBefore = (int)GameController.IngameState.ServerData.PlayerInventories[0].Inventory.CountItems;
-            DebugWindow.LogMsg($"HighlightedItems: Inventory count before: {inventoryCountBefore}");
-
-            // Move beasts with retry logic
+            int inventoryCountBefore = GetInventoryCount();
             int retryAttempt = 0;
             int actuallyMoved = 0;
 
             while (retryAttempt <= maxRetries)
             {
-                var attemptStart = Stopwatch.StartNew();
-                DebugWindow.LogMsg($"HighlightedItems: Attempt {retryAttempt + 1}/{maxRetries + 1} to move beasts");
-
-                // Add extra delay before first batch to ensure Ctrl is registered
                 if (isFirstBatch)
                 {
                     await Wait(TimeSpan.FromMilliseconds(30), true);
                     isFirstBatch = false;
                 }
 
-                bool success = await MoveBeastsInternal(beastsToMove, bestiaryPanel);
-                DebugWindow.LogMsg($"HighlightedItems: MoveBeastsInternal completed in {attemptStart.ElapsedMilliseconds}ms");
-
-                if (!success)
+                if (!await MoveBeastsInternal(beastsToMove, bestiaryPanel))
                 {
-                    DebugWindow.LogMsg("HighlightedItems: MoveBeastsInternal failed");
                     await StopMovingItems();
                     return totalMoved > 0;
                 }
 
-                // Wait for inventory to change
-                DebugWindow.LogMsg($"HighlightedItems: Waiting for inventory change (timeout: {waitTimeout}ms)");
-                var waitStart = Stopwatch.StartNew();
                 await WaitForInventoryChange(inventoryCountBefore, waitTimeout);
-                DebugWindow.LogMsg($"HighlightedItems: Wait completed in {waitStart.ElapsedMilliseconds}ms");
 
-                // Check actual inventory change to determine how many beasts were moved
-                int inventoryCountAfter = (int)GameController.IngameState.ServerData.PlayerInventories[0].Inventory.CountItems;
+                int inventoryCountAfter = GetInventoryCount();
                 actuallyMoved = inventoryCountAfter - inventoryCountBefore;
-                DebugWindow.LogMsg($"HighlightedItems: Beasts moved: {actuallyMoved} (inventory: {inventoryCountBefore} -> {inventoryCountAfter})");
 
-                // CRITICAL: If inventory is now full, stop immediately
-                if (inventoryCountAfter >= 60)
+                if (IsInventoryFull())
                 {
-                    DebugWindow.LogMsg($"HighlightedItems: Inventory is now full ({inventoryCountAfter}/60), stopping immediately");
                     totalMoved += actuallyMoved;
                     await StopMovingItems();
                     return true;
                 }
 
-                if (actuallyMoved >= beastsToMove.Count)
-                {
-                    // All beasts moved successfully
-                    DebugWindow.LogMsg("HighlightedItems: All beasts moved successfully");
-                    break;
-                }
+                if (actuallyMoved >= beastsToMove.Count) break;
 
-                // Check if category is now empty
                 var beastsAfter = bestiaryPanel.GetBeastsFromCategory(currentCategory, 1);
-                if (beastsAfter == null || beastsAfter.Count == 0)
-                {
-                    DebugWindow.LogMsg("HighlightedItems: Category is now empty");
-                    break;
-                }
+                if (beastsAfter == null || beastsAfter.Count == 0) break;
 
                 if (retryAttempt < maxRetries && actuallyMoved < beastsToMove.Count)
                 {
                     int missedBeasts = beastsToMove.Count - actuallyMoved;
-                    DebugWindow.LogMsg($"HighlightedItems: Retry {retryAttempt + 1}/{maxRetries} - {missedBeasts} beasts missed");
-
-                    // Get fresh list of beasts for retry (up to missed count)
-                    var beastsForRetry = bestiaryPanel.GetBeastsFromCategory(currentCategory, Math.Min(9, missedBeasts));
+                    var beastsForRetry = bestiaryPanel.GetBeastsFromCategory(currentCategory, Math.Min(BEASTS_PER_BATCH, missedBeasts));
                     beastsForRetry.Reverse();
                     beastsToMove = beastsForRetry.Take(missedBeasts).ToList();
                     inventoryCountBefore = inventoryCountAfter;
                     retryAttempt++;
                 }
-                else
-                {
-                    break;
-                }
+                else break;
             }
 
             totalMoved += actuallyMoved;
-            DebugWindow.LogMsg($"HighlightedItems: Total moved so far: {totalMoved}/{totalFreeSlots}");
-
-            // CRITICAL: Check if we've reached our target or inventory is full
-            int finalInvCount = (int)GameController.IngameState.ServerData.PlayerInventories[0].Inventory.CountItems;
-            if (finalInvCount >= 60)
-            {
-                DebugWindow.LogMsg($"HighlightedItems: Inventory is full ({finalInvCount}/60), stopping");
-                break;
-            }
-
-            if (totalMoved >= totalFreeSlots)
-            {
-                DebugWindow.LogMsg($"HighlightedItems: Reached target ({totalMoved}/{totalFreeSlots}), stopping");
-                break;
-            }
-
-            // If nothing was moved, check why and possibly skip this category
+            if (IsInventoryFull() || totalMoved >= totalFreeSlots) break;
             if (actuallyMoved == 0)
             {
-                DebugWindow.LogMsg("HighlightedItems: No beasts were moved");
-
-                // Inventory has space but beasts didn't move - skip to next category
-                DebugWindow.LogMsg($"HighlightedItems: Beasts didn't fit or couldn't move, skipping category {currentCategory}");
                 currentCategory++;
                 continue;
             }
 
-            // Check if current category is empty, if so move to next (just check first beast)
             var remainingInCategory = bestiaryPanel.GetBeastsFromCategory(currentCategory, 1);
-            if (remainingInCategory == null || remainingInCategory.Count == 0)
-            {
-                DebugWindow.LogMsg($"HighlightedItems: Category {currentCategory} empty, moving to next");
-                currentCategory++;
-            }
+            if (remainingInCategory == null || remainingInCategory.Count == 0) currentCategory++;
 
-            // Small delay before next iteration
-            int delayMs = Settings.FastMode.Value ? 20 : 100;
-            DebugWindow.LogMsg($"HighlightedItems: Waiting {delayMs}ms before next iteration");
-            await Wait(TimeSpan.FromMilliseconds(delayMs), false);
+            await Wait(TimeSpan.FromMilliseconds(Settings.FastMode.Value ? 20 : 100), false);
         }
 
         DebugWindow.LogMsg($"HighlightedItems: Finished. Total moved: {totalMoved}");
@@ -901,31 +810,23 @@ public class HighlightedItems : BaseSettingsPlugin<Settings>
     private async SyncTask<bool> MoveBeastsToInventoryForce()
     {
         DebugWindow.LogMsg("HighlightedItems: MoveBeastsToInventoryForce started");
-        var startTime = Stopwatch.StartNew();
 
-        // For bestiary, skip idle mouse delay - we use Ctrl+Click, not drag-and-drop
+        // Wait for mouse to be released
         while (Control.MouseButtons == MouseButtons.Left || MoveCancellationRequested)
         {
-            if (MoveCancellationRequested)
-            {
-                return false;
-            }
+            if (MoveCancellationRequested) return false;
             await TaskUtils.NextFrame();
         }
-        DebugWindow.LogMsg($"HighlightedItems: Mouse check completed in {startTime.ElapsedMilliseconds}ms");
 
-        // Check if Bestiary panel is open (use cached version for speed)
-        var panelCheckStart = Stopwatch.StartNew();
+        // Check if Bestiary panel is open
         var bestiaryPanel = GetBestiaryPanelCached();
-        DebugWindow.LogMsg($"HighlightedItems: Panel check completed in {panelCheckStart.ElapsedMilliseconds}ms");
-
         if (bestiaryPanel == null)
         {
             DebugWindow.LogMsg("HighlightedItems: Bestiary panel is not open");
             return false;
         }
 
-        // Open inventory if not already open
+        // Open inventory if needed
         if (!InGameState.IngameUi.InventoryPanel.IsVisible)
         {
             DebugWindow.LogMsg("HighlightedItems: Opening inventory...");
@@ -933,119 +834,81 @@ public class HighlightedItems : BaseSettingsPlugin<Settings>
             Keyboard.KeyUp(Keys.I);
             await Wait(TimeSpan.FromMilliseconds(150), false);
 
-            // Verify inventory opened
             if (!InGameState.IngameUi.InventoryPanel.IsVisible)
             {
                 DebugWindow.LogMsg("HighlightedItems: Failed to open inventory");
                 return false;
             }
         }
-        DebugWindow.LogMsg($"HighlightedItems: Initialization completed in {startTime.ElapsedMilliseconds}ms");
 
-        // Save initial mouse position and press Ctrl ONCE at the start
+        // Save initial mouse position and press Ctrl
         _prevMousePos = Mouse.GetCursorPosition();
-        DebugWindow.LogMsg("HighlightedItems: Pressing Ctrl key");
         Keyboard.KeyDown(Keys.LControlKey);
         await Wait(KeyDelay, true);
 
         int totalMoved = 0;
         int currentCategory = 0;
-        bool isFirstBatch = true; // Track first batch for initial delay
-        var workTimer = Stopwatch.StartNew(); // Track continuous work time
+        bool isFirstBatch = true;
+        var workTimer = Stopwatch.StartNew();
 
-        while (currentCategory < 12)
+        while (currentCategory < BESTIARY_CATEGORIES)
         {
-            // Check for cancellation
             if (MoveCancellationRequested)
             {
-                DebugWindow.LogMsg("HighlightedItems: Cancellation requested");
                 await StopMovingItems();
                 return totalMoved > 0;
             }
 
-            // Pause for 1 second after every 10 seconds of continuous work
-            if (workTimer.ElapsedMilliseconds >= 10000)
+            // Pause after continuous work
+            if (workTimer.ElapsedMilliseconds >= WORK_PAUSE_INTERVAL_MS)
             {
-                DebugWindow.LogMsg("HighlightedItems: Pausing for 1 second after 10 seconds of work");
-                await Wait(TimeSpan.FromMilliseconds(1000), false);
+                await Wait(TimeSpan.FromMilliseconds(WORK_PAUSE_DURATION_MS), false);
                 workTimer.Restart();
-                DebugWindow.LogMsg("HighlightedItems: Resuming work");
             }
 
             bestiaryPanel = GetBestiaryPanelCached();
             if (bestiaryPanel == null)
             {
-                DebugWindow.LogMsg("HighlightedItems: Bestiary panel not found");
                 await StopMovingItems();
                 return totalMoved > 0;
             }
 
-            // Get beasts from current category only (limit to 9 for performance)
-            var beasts = bestiaryPanel.GetBeastsFromCategory(currentCategory, 9);
-
-            // If no beasts in this category, move to next
+            // Get beasts from current category
+            var beasts = bestiaryPanel.GetBeastsFromCategory(currentCategory, BEASTS_PER_BATCH);
             if (beasts == null || beasts.Count == 0)
             {
-                DebugWindow.LogMsg($"HighlightedItems: Category {currentCategory} is empty, skipping");
                 currentCategory++;
                 continue;
             }
 
             int beastsBeforeBatch = beasts.Count;
-            DebugWindow.LogMsg($"HighlightedItems: Category {currentCategory} has {beastsBeforeBatch} beasts");
-
-            // Reverse order: bottom to top, right to left
             beasts.Reverse();
 
-            // Take up to 9 visible beasts from this category
-            int beastsToTake = Math.Min(9, beasts.Count);
+            int beastsToTake = Math.Min(BEASTS_PER_BATCH, beasts.Count);
             var beastsToMove = beasts.Take(beastsToTake).ToList();
 
-            DebugWindow.LogMsg($"HighlightedItems: Category {currentCategory}: Moving {beastsToMove.Count} beasts (force mode)");
-
-            // Add extra delay before first batch to ensure Ctrl is registered
             if (isFirstBatch)
             {
                 await Wait(TimeSpan.FromMilliseconds(30), true);
                 isFirstBatch = false;
             }
 
-            // Move beasts (no retry in force mode)
-            var moveStart = Stopwatch.StartNew();
-            bool success = await MoveBeastsInternal(beastsToMove, bestiaryPanel);
-            DebugWindow.LogMsg($"HighlightedItems: MoveBeastsInternal completed in {moveStart.ElapsedMilliseconds}ms");
-
-            if (!success)
+            if (!await MoveBeastsInternal(beastsToMove, bestiaryPanel))
             {
-                DebugWindow.LogMsg("HighlightedItems: MoveBeastsInternal failed");
                 await StopMovingItems();
                 return totalMoved > 0;
             }
 
-            // Short fixed delay instead of waiting for inventory change (faster when inventory is full)
-            int delayMs = Settings.FastMode.Value ? 30 : 100;  // Reduced from 50/150
-            DebugWindow.LogMsg($"HighlightedItems: Waiting {delayMs}ms");
-            await Wait(TimeSpan.FromMilliseconds(delayMs), false);
+            await Wait(TimeSpan.FromMilliseconds(Settings.FastMode.Value ? 30 : 100), false);
 
-            // Check how many beasts are left in this category (limit to 9 for performance)
-            var beastsAfter = bestiaryPanel.GetBeastsFromCategory(currentCategory, 9);
+            // Check how many beasts are left
+            var beastsAfter = bestiaryPanel.GetBeastsFromCategory(currentCategory, BEASTS_PER_BATCH);
             int beastsAfterBatch = beastsAfter?.Count ?? 0;
             int actuallyMoved = beastsBeforeBatch - beastsAfterBatch;
-            DebugWindow.LogMsg($"HighlightedItems: Beasts moved: {actuallyMoved} (before: {beastsBeforeBatch}, after: {beastsAfterBatch})");
 
             totalMoved += actuallyMoved;
-            DebugWindow.LogMsg($"HighlightedItems: Total moved so far: {totalMoved}");
 
-            // Check if current category is empty, if so move to next
-            if (beastsAfterBatch == 0)
-            {
-                DebugWindow.LogMsg($"HighlightedItems: Category {currentCategory} empty, moving to next");
-                currentCategory++;
-            }
-            else
-            {
-                DebugWindow.LogMsg($"HighlightedItems: Category {currentCategory} still has {beastsAfterBatch} beasts");
-            }
+            if (beastsAfterBatch == 0) currentCategory++;
         }
 
         DebugWindow.LogMsg($"HighlightedItems: Finished. Total moved: {totalMoved}");
